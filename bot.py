@@ -6,18 +6,21 @@ from decimal import Decimal
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
+# SQLAlchemy
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Float, BigInteger, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# For older solana-py, ensure you're pinned to e.g. solana==0.18.1
+# Solana + solders
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
-from solana.keypair import Keypair
+from solders.keypair import Keypair
 
-from pydantic import BaseModel, field_validator  # Pydantic 2.x style
+# Pydantic 2.x
+from pydantic import BaseModel, field_validator
 import base58
 
-import aggregator  # <--- aggregator.py (make sure serum_market_address is valid!)
+# Our aggregator (Raydium/Orca/Saber only)
+import aggregator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +28,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# ----------------- Config -----------------
 Base = declarative_base()
 
 class Config(BaseModel):
@@ -122,12 +124,11 @@ class SolanaManager:
     async def get_balance(self) -> Decimal:
         """
         Returns SOL balance (converted from lamports).
-        NOTE: For older solana-py versions, resp is a dict.
+        NOTE: On older or advanced solana-py, response can be a raw dict. Adjust as needed.
         """
         try:
             resp = await self.client.get_balance(self.pubkey, commitment=Confirmed)
-            # In older solana-py, the result is a raw dict:
-            lamports = resp["result"]["value"]  # <-- fix for 'dict' object has no attribute 'value'
+            lamports = resp["result"]["value"]  # Key into the raw dict
             sol_balance = Decimal(lamports) / Decimal(1_000_000_000)
             logging.info(f"SOL Balance: {sol_balance} (lamports={lamports})")
             return sol_balance
@@ -151,14 +152,16 @@ class ArbitrageEngine:
         Check aggregator data for profitable spread. Return a list of potential trades.
         """
         ops = []
+
+        # 1) Check wallet balance first
         wallet_balance = await self.solana.get_balance()
         if wallet_balance <= Decimal(0):
             logging.error("No SOL balance available.")
             return ops
 
+        # 2) For each pair, see if aggregator shows a profitable spread
         for pair in token_pairs:
-            # aggregator key, e.g. "SOL_USDC"
-            aggregator_key = "SOL_USDC"
+            aggregator_key = "SOL_USDC"  # just an example name
             spread_data = aggregator.get_best_spread_for_pair(aggregator_key)
             if not spread_data:
                 logging.info(f"No aggregator data for {aggregator_key}")
@@ -166,15 +169,14 @@ class ArbitrageEngine:
 
             spread = Decimal(spread_data["spread"])
             net_profit = spread - self.config.transaction_fee
-            logging.info(
-                f"[{aggregator_key}] Spread={spread:.6f}, NetProfit={net_profit:.6f}"
-            )
+            logging.info(f"[{aggregator_key}] Spread={spread:.6f}, NetProfit={net_profit:.6f}")
             if net_profit > self.config.min_profit:
                 ops.append({
                     "pair": pair,
                     "profit": net_profit,
                     "spread_info": spread_data
                 })
+
         return sorted(ops, key=lambda x: x["profit"], reverse=True)
 
     async def execute_arbitrage(self, opportunity: Dict) -> bool:
@@ -195,8 +197,8 @@ class ArbitrageEngine:
             sell_dex = spread_info["highest_bid_dex"]
             logging.info(f"REAL TRADE => Buy on {buy_dex}, Sell on {sell_dex}")
 
-            # Placeholder for your actual Serum or Raydium order instructions
-            raise NotImplementedError("Replace with your on-chain Serum instructions")
+            # Placeholder for real on-chain instructions with Raydium or other DEX.
+            raise NotImplementedError("Replace with your on-chain swap/AMM instructions")
 
         except Exception as e:
             latency = time.time() - start_time
@@ -238,7 +240,6 @@ class ArbitrageEngine:
 class RiskManager:
     def __init__(self, config: Config):
         self.config = config
-        # Example placeholders for risk rules
         self.max_daily_loss = Decimal("0.1")
         self.position_size = Decimal("0.01")
         self.stop_loss = Decimal("0.05")
@@ -247,7 +248,7 @@ class RiskManager:
         """
         If it passes your custom risk checks, return True.
         """
-        # e.g., check daily PnL, wallet health, etc.
+        # For example, verify daily PnL, wallet health, etc.
         return True
 
 class PerformanceMonitor:
@@ -266,7 +267,7 @@ class PerformanceMonitor:
         if success:
             self.metrics["trades_executed"] += 1
             self.success_count += 1
-        # optionally compute avg_profit, etc.
+        # Could compute avg profit, success rate, etc.
 
     def generate_report(self):
         if self.metrics["opportunities_checked"] > 0:
@@ -277,17 +278,16 @@ class PerformanceMonitor:
 
 # ----------------- Main -----------------
 async def main():
-    # 1) Build config from environment variables
+    # 1) Build config from environment
     config = build_config()
 
-    # 2) Initialize engine, risk manager, and performance monitor
+    # 2) Create engine + risk manager + performance monitor
     arbitrage_engine = ArbitrageEngine(config)
-    await arbitrage_engine.solana.initialize()
+    await arbitrage_engine.solana.initialize()  # checks RPC
     risk_manager = RiskManager(config)
     monitor = PerformanceMonitor()
 
-    # 3) Example token pair: SOL (So111...) and USDC (Es9v...), 
-    #    if you plan to do direct SPL token transfers.
+    # 3) e.g. track SOL / USDC
     token_pairs = [
         ("So11111111111111111111111111111111111111112",
          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")
@@ -299,15 +299,13 @@ async def main():
     try:
         while True:
             try:
-                # a) find potential spreads
                 opportunities = await arbitrage_engine.find_arbitrage_cycles(token_pairs)
                 for opp in opportunities:
-                    # b) run risk checks
                     if await risk_manager.check_risk_parameters():
-                        # c) if good, attempt arbitrage
                         success = await arbitrage_engine.execute_arbitrage(opp)
                         monitor.update_metrics(success, float(opp["profit"]), 0)
-                # d) sleep a bit before next cycle
+
+                # Sleep between checks
                 await asyncio.sleep(5)
             except KeyboardInterrupt:
                 logging.info("Shutting down gracefully.")
@@ -316,7 +314,6 @@ async def main():
                 logging.error(f"Critical error: {e}, retrying in 10s.")
                 await asyncio.sleep(10)
     finally:
-        # 5) cancel aggregator + finalize
         collector_task.cancel()
         monitor.generate_report()
         await arbitrage_engine.solana.client.close()
