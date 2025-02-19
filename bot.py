@@ -3,11 +3,8 @@ import asyncio
 import logging
 import time
 from decimal import Decimal
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 from datetime import datetime
-
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Float, BigInteger, Index
-from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Using solana-py with solders:
 from solana.rpc.async_api import AsyncClient
@@ -18,15 +15,13 @@ from solders.keypair import Keypair
 from pydantic import BaseModel, field_validator
 import base58
 
-import aggregator  # <--- aggregator.py (which uses the new HTTP-based approach)
+import aggregator  # aggregator.py (which uses the new HTTP-based approach)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
-Base = declarative_base()
 
 class Config(BaseModel):
     rpc_url: str
@@ -49,7 +44,7 @@ class Config(BaseModel):
         except Exception as e:
             raise ValueError(f"Invalid private key: {str(e)}")
 
-def build_config() -> "Config":
+def build_config() -> Config:
     """
     Reads environment variables and builds the Config object.
     Expects:
@@ -58,7 +53,6 @@ def build_config() -> "Config":
       - MIN_PROFIT_SOL       (optional)
       - TRANSACTION_FEE_SOL  (optional)
       - DRY_RUN              (optional)
-      - DATABASE_URL         (optional)
     """
     rpc_url = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
     priv_key = os.getenv("PRIVATE_KEY_BASE58", "")
@@ -70,34 +64,6 @@ def build_config() -> "Config":
         transaction_fee=Decimal(os.getenv("TRANSACTION_FEE_SOL", "0.00002")),
         dry_run=(dry_run_str.lower() in ["true", "1", "yes"])
     )
-
-# ----------------- Database Models -----------------
-class ArbitrageOpportunity(Base):
-    __tablename__ = "arbitrage_opportunities"
-
-    id = Column(Integer, primary_key=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    route = Column(String(255))
-    expected_profit = Column(Float)
-    actual_profit = Column(Float)
-    status = Column(String(255))
-    tx_hash = Column(String(255))
-    gas_used = Column(BigInteger)
-    latency = Column(Float)
-    error = Column(String(255))
-
-    __table_args__ = (
-        Index('idx_status_created', 'status', 'created_at'),
-    )
-
-class WalletState(Base):
-    __tablename__ = "wallet_states"
-
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    balance = Column(Float)
-    active_positions = Column(Integer)
-    health_score = Column(Float)
 
 # ----------------- Solana Manager -----------------
 class SolanaManager:
@@ -124,13 +90,9 @@ class SolanaManager:
     async def get_balance(self) -> Decimal:
         """
         Returns SOL balance (converted from lamports).
-
-        In the new solana-py, the response is a typed object (e.g. GetBalanceResp)
-        with a `.value` attribute containing the lamport balance.
         """
         try:
             resp = await self.client.get_balance(self.pubkey, commitment=Confirmed)
-            # Access lamports using .value rather than subscripting
             lamports = resp.value
             sol_balance = Decimal(lamports) / Decimal(1_000_000_000)
             logging.info(f"SOL Balance: {sol_balance} (lamports={lamports})")
@@ -144,11 +106,7 @@ class ArbitrageEngine:
     def __init__(self, config: Config):
         self.config = config
         self.solana = SolanaManager(config)
-
-        db_url = os.getenv("DATABASE_URL", "sqlite:///arbitrage.db")
-        engine = create_engine(db_url)
-        Base.metadata.create_all(engine)
-        self.session = sessionmaker(bind=engine)()
+        # SQLAlchemy initialization removed
 
     async def find_arbitrage_cycles(self, token_pairs: List[Tuple[str, str]]) -> List[Dict]:
         """
@@ -206,32 +164,11 @@ class ArbitrageEngine:
 
     def _record_trade(self, opp: Dict, tx_hash: str, gas_used: int, latency: float):
         logging.info(f"Trade success: {tx_hash}, profit={opp['profit']}, latency={latency:.2f}s")
-        arb = ArbitrageOpportunity(
-            route=str(opp["pair"]),
-            expected_profit=float(opp["profit"]),
-            actual_profit=0.0,
-            status="success",
-            tx_hash=tx_hash,
-            gas_used=gas_used,
-            latency=latency
-        )
-        self.session.add(arb)
-        self.session.commit()
+        # Removed database recording; trade recorded via logging
 
     def _record_error(self, opp: Dict, error: str, latency: float):
         logging.error(f"Trade failed for {opp.get('pair')}, error={error}, latency={latency:.2f}s")
-        arb = ArbitrageOpportunity(
-            route=str(opp.get("pair")),
-            expected_profit=float(opp.get("profit", 0.0)),
-            actual_profit=0.0,
-            status="error",
-            tx_hash="",
-            gas_used=0,
-            latency=latency,
-            error=error
-        )
-        self.session.add(arb)
-        self.session.commit()
+        # Removed database recording; error recorded via logging
 
 # ----------------- Additional Classes -----------------
 class RiskManager:
@@ -282,7 +219,7 @@ async def main():
     risk_manager = RiskManager(config)
     monitor = PerformanceMonitor()
 
-    # Example token pair: SOL (So11111111111111111111111111111111111111112) and USDC (Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB)
+    # Example token pair: SOL and USDC
     token_pairs = [
         ("So11111111111111111111111111111111111111112",
          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")
